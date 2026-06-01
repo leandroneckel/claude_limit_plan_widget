@@ -9,6 +9,13 @@ com icone no system tray.
 App nativo em Python + PySide6, compilado em um executavel unico com PyInstaller.
 Sem Docker, sem servico externo, sem dependencias web.
 
+## Exemplo
+
+![Exemplo do widget mostrando os limites de uso do plano](img_sample/image.png)
+
+O widget exibe a sessao atual (janela de 5h), os limites semanais e os
+creditos de uso, com barras de progresso e o tempo para reiniciar.
+
 ## Recursos
 
 - Janela pequena, sem borda, cantos arredondados, caixa escura solida com borda.
