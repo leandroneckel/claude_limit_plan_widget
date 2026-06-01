@@ -30,7 +30,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtCore import Qt, QTimer, QPoint, QSharedMemory
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -476,6 +476,13 @@ class Aplicacao:
         self.app = QApplication(sys.argv)
         # Nao encerra quando a janela e ocultada (so pelo menu Sair).
         self.app.setQuitOnLastWindowClosed(False)
+
+        # Instancia unica: se ja houver um widget rodando, sai.
+        # Evita varias instancias consultando o endpoint e tomando 429.
+        self._shm = QSharedMemory("ClaudeUsageWidget_SingleInstance")
+        if not self._shm.create(1):
+            # Outra instancia ja segura o segmento de memoria.
+            sys.exit(0)
 
         self.icone = gerar_icone()
 

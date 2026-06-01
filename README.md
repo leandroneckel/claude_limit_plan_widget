@@ -26,7 +26,11 @@ creditos de uso, com barras de progresso e o tempo para reiniciar.
   - **Semanal (somente Sonnet)**: % usado.
   - **Creditos de uso**: gasto x limite (quando habilitado).
 - Atualiza o tempo restante a cada 2 segundos e busca os dados na rede a
-  cada 60 segundos (em uma thread, para nao travar a interface).
+  cada 5 minutos (em uma thread, para nao travar a interface). O endpoint
+  de uso e limitado no servidor, entao o intervalo e propositalmente baixo
+  e ha backoff automatico se vier um 429 (rate limit).
+- Roda em instancia unica: abrir o programa de novo nao cria um segundo
+  widget (evita consultas duplicadas e 429).
 - Arrastavel com o mouse. A posicao persiste entre execucoes.
 - Icone no system tray com menu: Mostrar/Ocultar, Atualizar agora,
   alternar Fonte, Resetar (modo tokens), Sair.

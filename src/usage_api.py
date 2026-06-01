@@ -40,8 +40,15 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 ANTHROPIC_BETA = "oauth-2025-04-20"
 
 # Intervalo minimo entre chamadas reais a rede (segundos).
-# A tela de Uso da Anthropic tambem atualiza de poucos em poucos minutos.
-INTERVALO_MIN_FETCH = 60
+# O endpoint de uso e bastante limitado no servidor, e a propria tela de
+# Uso da Anthropic atualiza so a cada poucos minutos. 5 minutos e suficiente
+# e evita tomar 429 (rate limit).
+INTERVALO_MIN_FETCH = 300
+
+# Backoff progressivo quando o servidor responde 429 (rate limit).
+# Em vez de insistir no mesmo ritmo, espera cada vez mais, ate o teto.
+BACKOFF_INICIAL = 300       # 5 min
+BACKOFF_MAX = 1800          # 30 min
 
 # Mapeia o rateLimitTier para um rotulo amigavel do plano.
 ROTULOS_PLANO = {
@@ -52,6 +59,10 @@ ROTULOS_PLANO = {
 
 # Cache em memoria para nao bater na rede a cada atualizacao do widget.
 _cache = {"momento": 0.0, "resultado": None}
+
+# Controle de backoff por 429: ate quando estamos bloqueados de tentar de novo
+# e qual o tamanho atual do backoff (cresce a cada 429 seguido).
+_backoff = {"ate": 0.0, "atual": 0}
 
 
 def _ler_credenciais():
@@ -221,6 +232,11 @@ def ler_limites(forcar=False):
             and agora - _cache["momento"] < INTERVALO_MIN_FETCH):
         return _cache["resultado"]
 
+    # Se estamos em backoff por 429, nem tenta ir a rede (mesmo com forcar).
+    # Isso evita insistir e piorar o rate limit.
+    if agora < _backoff["ate"] and _cache["resultado"] is not None:
+        return _cache["resultado"]
+
     access, plano = _obter_token_valido()
     if not access:
         resultado = {
@@ -243,6 +259,32 @@ def ler_limites(forcar=False):
         with urllib.request.urlopen(req, timeout=10) as resp:
             dados = json.load(resp)
     except urllib.error.HTTPError as erro:
+        if erro.code == 429:
+            # Rate limit: aplica backoff progressivo antes de tentar de novo.
+            # Respeita o header Retry-After quando ele traz um valor util.
+            try:
+                retry_after = int(erro.headers.get("Retry-After", "0") or 0)
+            except (TypeError, ValueError):
+                retry_after = 0
+            _backoff["atual"] = min(
+                max(BACKOFF_INICIAL, _backoff["atual"] * 2 or BACKOFF_INICIAL),
+                BACKOFF_MAX,
+            )
+            espera = max(retry_after, _backoff["atual"])
+            _backoff["ate"] = agora + espera
+            resultado = {
+                "ok": False,
+                "erro": "limite atingido (429), tentando de novo em %dmin"
+                        % max(1, espera // 60),
+            }
+            # Mantem o ultimo dado bom na tela, se existir.
+            if _cache["resultado"] is not None and _cache["resultado"].get("ok"):
+                _cache["momento"] = agora
+                return _cache["resultado"]
+            _cache["resultado"] = resultado
+            _cache["momento"] = agora
+            return resultado
+
         resultado = {"ok": False, "erro": "HTTP %s" % erro.code}
         _cache["resultado"] = resultado
         _cache["momento"] = agora
@@ -269,6 +311,10 @@ def ler_limites(forcar=False):
             "used_credits": extra.get("used_credits"),
             "currency": extra.get("currency"),
         }
+
+    # Sucesso: zera o backoff de 429.
+    _backoff["ate"] = 0.0
+    _backoff["atual"] = 0
 
     resultado = {
         "ok": True,
