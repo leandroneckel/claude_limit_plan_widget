@@ -1,0 +1,30 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Artefatos do PyInstaller
+build/
+dist/
+*.spec
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Config e estado locais (ficam no perfil do usuario, mas por seguranca)
+.claude_tokens.json
+.claude_token_widget.json
+
+# IDE
+.vscode/
+.idea/
+
+# Imagens coladas no chat / artefatos da IDE (nao fazem parte do projeto)
+image/
+
+# Credenciais (nunca versionar). O widget le do %USERPROFILE%, nao daqui,
+# mas deixamos explicito por seguranca.
+.credentials.json
+*.pem
+*.key
