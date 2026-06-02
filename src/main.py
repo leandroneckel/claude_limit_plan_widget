@@ -30,7 +30,8 @@ import sys
 import threading
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QSharedMemory
+from PySide6.QtCore import Qt, QTimer, QPoint, QSharedMemory, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -54,7 +55,9 @@ import claude_session
 import config
 import pricing
 import token_logger
+import updater
 import usage_api
+import version
 
 # Ordem de alternancia das fontes no menu do tray.
 FONTES = ["limites", "claude", "arquivo"]
@@ -101,6 +104,10 @@ def gerar_icone():
 class TokenWidget(QWidget):
     """Janela flutuante que exibe o uso conforme a fonte configurada."""
 
+    # Emitido (na main thread) quando a checagem de versao no GitHub termina.
+    # Carrega o dict de updater.verificar_atualizacao() acrescido de "_manual".
+    versao_verificada = Signal(dict)
+
     def __init__(self):
         super().__init__()
 
@@ -113,6 +120,8 @@ class TokenWidget(QWidget):
 
         # Ultimo resultado de limites obtido pela thread de rede.
         self._ultimo_limites = None
+        # Ultimo resultado da checagem de versao no GitHub.
+        self._info_versao = None
         self._lock = threading.Lock()
         self._parar = threading.Event()
 
@@ -197,8 +206,14 @@ class TokenWidget(QWidget):
             " font-size: 11px;"
         )
 
+        # Rodape com a versao instalada (e aviso de atualizacao, se houver).
+        self.label_versao = QLabel("")
+        self.label_versao.setTextFormat(Qt.RichText)
+        self.label_versao.setStyleSheet("font-size: 9px;")
+
         layout.addWidget(self.label_titulo)
         layout.addWidget(self.label_corpo)
+        layout.addWidget(self.label_versao)
         self.setLayout(layout)
 
     def _iniciar_timer(self):
@@ -228,6 +243,40 @@ class TokenWidget(QWidget):
 
         self._thread = threading.Thread(target=loop, daemon=True)
         self._thread.start()
+
+    def verificar_versao(self, forcar=False):
+        """
+        Verifica em background se ha versao mais nova no GitHub.
+
+        A consulta HTTP roda numa thread para nao travar a UI; ao terminar,
+        guarda o resultado e emite o sinal versao_verificada (entregue na
+        main thread, onde e seguro mexer no tray e mostrar balao).
+        """
+        def tarefa():
+            try:
+                info = dict(updater.verificar_atualizacao(forcar=forcar))
+            except Exception:
+                info = {"ok": False, "erro": "falha interna",
+                        "local": version.__version__}
+            info["_manual"] = forcar
+            with self._lock:
+                self._info_versao = info
+            self.versao_verificada.emit(info)
+
+        threading.Thread(target=tarefa, daemon=True).start()
+
+    def _texto_versao(self):
+        """Monta o texto do rodape com a versao e o aviso de atualizacao."""
+        with self._lock:
+            info = self._info_versao
+        rotulo = "v%s" % version.__version__
+        if (isinstance(info, dict) and info.get("ok")
+                and info.get("tem_atualizacao")):
+            return (
+                '<span style="color:#FFD27C">%s &#8226; atualizacao %s '
+                'disponivel</span>' % (rotulo, info.get("remota"))
+            )
+        return '<span style="color:#6a6f7a">%s</span>' % rotulo
 
     def parar(self):
         """Sinaliza para a thread de rede encerrar."""
@@ -473,6 +522,7 @@ class TokenWidget(QWidget):
 
         self.label_titulo.setText(titulo)
         self.label_corpo.setText(corpo)
+        self.label_versao.setText(self._texto_versao())
 
         # Ajusta a altura ao conteudo, mantendo largura fixa.
         self.adjustSize()
@@ -521,11 +571,18 @@ class Aplicacao:
 
         self.icone = gerar_icone()
 
+        # Para nao repetir o balao de "atualizacao disponivel" a cada checagem.
+        self._avisou_atualizacao = False
+
         self.widget = TokenWidget()
         self.widget.setWindowIcon(self.icone)
+        self.widget.versao_verificada.connect(self._on_versao)
         self.widget.show()
 
         self._montar_tray()
+
+        # Checagem de versao no startup (roda em background).
+        self.widget.verificar_versao()
 
     def _montar_tray(self):
         """Cria o icone do system tray com o menu de acoes."""
@@ -550,6 +607,18 @@ class Aplicacao:
         acao_resetar = QAction("Resetar (modo tokens)", menu)
         acao_resetar.triggered.connect(self.resetar)
         menu.addAction(acao_resetar)
+
+        menu.addSeparator()
+
+        acao_atualizacao = QAction("Verificar atualizacao", menu)
+        acao_atualizacao.triggered.connect(self.verificar_atualizacao_agora)
+        menu.addAction(acao_atualizacao)
+
+        acao_projeto = QAction("Abrir pagina do projeto", menu)
+        acao_projeto.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(updater.URL_PROJETO))
+        )
+        menu.addAction(acao_projeto)
 
         menu.addSeparator()
 
@@ -623,6 +692,58 @@ class Aplicacao:
             token_logger.resetar_sessao()
 
         self.widget.atualizar_dados()
+
+    def verificar_atualizacao_agora(self):
+        """Forca uma checagem de versao no GitHub (item de menu)."""
+        self.widget.verificar_versao(forcar=True)
+
+    def _on_versao(self, info):
+        """
+        Reage ao resultado da checagem de versao (rodando na main thread).
+
+        Atualiza o tooltip do tray e mostra um balao quando ha atualizacao
+        (uma vez no modo automatico; sempre quando o usuario pede pelo menu).
+        """
+        if not isinstance(info, dict):
+            return
+        manual = info.get("_manual")
+
+        if info.get("ok"):
+            if info.get("tem_atualizacao"):
+                self.tray.setToolTip(
+                    "Widget de Uso do Claude - atualizacao %s disponivel"
+                    % info.get("remota")
+                )
+                if manual or not self._avisou_atualizacao:
+                    self.tray.showMessage(
+                        "Atualizacao disponivel",
+                        "Versao %s no GitHub (voce tem %s). Abra a pagina do "
+                        "projeto para baixar."
+                        % (info.get("remota"), info.get("local")),
+                        QSystemTrayIcon.Information,
+                        8000,
+                    )
+                    self._avisou_atualizacao = True
+            else:
+                self.tray.setToolTip(
+                    "Widget de Uso do Claude - v%s (atualizado)"
+                    % info.get("local")
+                )
+                if manual:
+                    self.tray.showMessage(
+                        "Tudo certo",
+                        "Voce ja esta na versao mais recente (%s)."
+                        % info.get("local"),
+                        QSystemTrayIcon.Information,
+                        5000,
+                    )
+        elif manual:
+            self.tray.showMessage(
+                "Nao foi possivel verificar",
+                info.get("erro", "erro desconhecido"),
+                QSystemTrayIcon.Warning,
+                5000,
+            )
 
     def alternar_visibilidade(self):
         """Mostra ou oculta o widget."""
