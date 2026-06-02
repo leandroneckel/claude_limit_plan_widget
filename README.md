@@ -9,6 +9,18 @@ com ícone no system tray.
 App nativo em Python + PySide6, compilado em um executável único com PyInstaller.
 Sem Docker, sem serviço externo, sem dependências web.
 
+## Suporte opcional ao Codex
+
+O menu do system tray possui um seletor de provedor para alternar entre Claude
+e Codex. No modo Codex, o widget consulta `account/rateLimits/read` pelo
+`codex app-server --stdio` local a cada minuto. Se o CLI estiver indisponível,
+usa como fallback os eventos `token_count` gravados em
+`%USERPROFILE%\.codex\sessions\...\rollout-*.jsonl`.
+
+O widget não lê `%USERPROFILE%\.codex\auth.json`: a autenticação continua sob
+responsabilidade do próprio CLI do Codex. A configuração, a fonte manual e o
+comportamento Claude originais são preservados.
+
 ## Exemplo
 
 ![Exemplo do widget mostrando os limites de uso do plano](img_sample/image.png)

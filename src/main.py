@@ -28,6 +28,7 @@ Para rodar em modo dev:
 
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QSharedMemory, QUrl, Signal
@@ -52,6 +53,8 @@ from PySide6.QtWidgets import (
 )
 
 import claude_session
+import codex_session
+import codex_usage_api
 import config
 import pricing
 import token_logger
@@ -61,11 +64,17 @@ import version
 
 # Ordem de alternancia das fontes no menu do tray.
 FONTES = ["limites", "claude", "arquivo"]
+PROVEDORES = ["claude", "codex"]
+
+ROTULO_PROVEDOR = {
+    "claude": "Claude",
+    "codex": "Codex",
+}
 
 # Rotulos amigaveis das fontes.
 ROTULO_FONTE = {
     "limites": "Limites do plano",
-    "claude": "Tokens da sessao Claude",
+    "claude": "Tokens da sessao",
     "arquivo": "Arquivo manual",
 }
 
@@ -107,6 +116,7 @@ class TokenWidget(QWidget):
     # Emitido (na main thread) quando a checagem de versao no GitHub termina.
     # Carrega o dict de updater.verificar_atualizacao() acrescido de "_manual".
     versao_verificada = Signal(dict)
+    limites_codex_atualizados = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -120,6 +130,9 @@ class TokenWidget(QWidget):
 
         # Ultimo resultado de limites obtido pela thread de rede.
         self._ultimo_limites = None
+        self._ultimo_limites_codex = None
+        self._busca_codex_em_andamento = False
+        self._ultima_busca_codex = 0.0
         # Ultimo resultado da checagem de versao no GitHub.
         self._info_versao = None
         self._lock = threading.Lock()
@@ -129,6 +142,7 @@ class TokenWidget(QWidget):
         self._montar_layout()
         self._iniciar_thread_limites()
         self._iniciar_timer()
+        self.limites_codex_atualizados.connect(self._on_limites_codex)
 
         # Primeira atualizacao imediata.
         self.atualizar_dados()
@@ -337,8 +351,11 @@ class TokenWidget(QWidget):
         if not iso:
             return ""
         try:
-            dt = datetime.fromisoformat(iso)
-        except (ValueError, TypeError):
+            if isinstance(iso, (int, float)):
+                dt = datetime.fromtimestamp(iso, timezone.utc)
+            else:
+                dt = datetime.fromisoformat(iso)
+        except (ValueError, TypeError, OSError):
             return ""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -366,6 +383,12 @@ class TokenWidget(QWidget):
     # ----- Renderizacao por fonte -----
 
     def _render_limites(self):
+        """Monta os limites do provedor selecionado."""
+        if self.config.get("provedor", "claude") == "codex":
+            return self._render_limites_codex()
+        return self._render_limites_claude()
+
+    def _render_limites_claude(self):
         """Monta titulo e corpo para a fonte de limites do plano."""
         with self._lock:
             dados = self._ultimo_limites
@@ -428,6 +451,94 @@ class TokenWidget(QWidget):
         corpo = '<div style="line-height:135%">' + "<br><br>".join(linhas) + "</div>"
         return titulo, corpo
 
+    def _render_limites_codex(self):
+        """Monta os limites Codex; usa rollout local enquanto consulta o CLI."""
+        self._buscar_limites_codex()
+        dados = self._ultimo_limites_codex or codex_session.ler_limites()
+        if not dados.get("ok"):
+            return (
+                "Limites Codex",
+                '<span style="color:#FFB0B0">sem dados<br>(%s)</span>'
+                % dados.get("erro", "indisponivel"),
+            )
+
+        titulo = "Limites Codex  %s" % dados.get("plano", "")
+        linhas = []
+
+        def bloco(rotulo, secao):
+            if not secao:
+                return
+            pct = secao.get("utilization", 0)
+            linha = (
+                '<b>%s</b>&nbsp;&nbsp;<span style="color:#ffffff"><b>%d%%</b>'
+                '</span><br>%s' % (rotulo, round(pct), self._barra_html(pct))
+            )
+            reset = self._tempo_restante(secao.get("resets_at"))
+            if reset:
+                linha += (
+                    '<br><span style="color:#9a9a9a; font-size:10px">%s</span>'
+                    % reset
+                )
+            linhas.append(linha)
+
+        bloco("Sessao atual", dados.get("sessao"))
+        bloco("Semanal", dados.get("semana"))
+        linhas.append(
+            '<span style="color:#777">%s: %s</span>'
+            % (
+                "consultado via Codex"
+                if dados.get("origem") == "app-server"
+                else "ultimo evento Codex",
+                self._horario_snapshot(dados.get("snapshot_at")),
+            )
+        )
+        return titulo, '<div style="line-height:135%">' + "<br><br>".join(linhas) + "</div>"
+
+    def _horario_snapshot(self, iso):
+        """Formata o horario local de um snapshot Codex."""
+        if not iso:
+            return "indisponivel"
+        try:
+            return datetime.fromisoformat(
+                str(iso).replace("Z", "+00:00")
+            ).astimezone().strftime("%H:%M:%S")
+        except (ValueError, TypeError):
+            return "invalido"
+
+    def _buscar_limites_codex(self, forcar=False):
+        """Consulta o app-server Codex em background."""
+        agora = time.time()
+        if self._busca_codex_em_andamento:
+            return
+        if (
+            not forcar
+            and agora - self._ultima_busca_codex
+            < codex_usage_api.INTERVALO_MIN_FETCH
+        ):
+            return
+        self._busca_codex_em_andamento = True
+        self._ultima_busca_codex = agora
+
+        def tarefa():
+            try:
+                resultado = codex_usage_api.ler_limites(forcar=forcar)
+            except Exception:
+                resultado = {"ok": False, "erro": "falha interna"}
+            self.limites_codex_atualizados.emit(resultado)
+
+        threading.Thread(target=tarefa, daemon=True).start()
+
+    def _on_limites_codex(self, resultado):
+        """Recebe na main thread o resultado da consulta Codex."""
+        self._busca_codex_em_andamento = False
+        if resultado.get("ok"):
+            self._ultimo_limites_codex = resultado
+        if (
+            self.config.get("provedor") == "codex"
+            and self.config.get("fonte") == "limites"
+        ):
+            self.atualizar_dados()
+
     def _num(self, valor):
         """Formata numero monetario simples (sem casas se inteiro)."""
         try:
@@ -440,6 +551,11 @@ class TokenWidget(QWidget):
 
     def _render_tokens(self, estado):
         """Monta titulo e corpo para as fontes em tokens (claude/arquivo)."""
+        if (
+            self.config.get("provedor") == "codex"
+            and self.config.get("fonte") == "claude"
+        ):
+            return self._render_tokens_codex(estado)
         entrada = int(estado.get("input_tokens", 0))
         saida = int(estado.get("output_tokens", 0))
         cache_write = int(estado.get("cache_creation_tokens", 0))
@@ -472,24 +588,56 @@ class TokenWidget(QWidget):
         )
         return "Consumo de tokens", corpo
 
+    def _render_tokens_codex(self, estado):
+        """Monta o consumo da thread Codex mais recente."""
+        entrada = int(estado.get("input_tokens", 0))
+        cache = int(estado.get("cached_input_tokens", 0))
+        saida = int(estado.get("output_tokens", 0))
+        raciocinio = int(estado.get("reasoning_output_tokens", 0))
+        total = int(estado.get("total_tokens", entrada + saida))
+        corpo = (
+            'modelo: %s<br>entrada: %s<br>entrada em cache: %s<br>'
+            'saida: %s<br>raciocinio: %s<br><b>total: %s</b>'
+            % (
+                estado.get("model", "Codex"),
+                self._formatar(entrada),
+                self._formatar(cache),
+                self._formatar(saida),
+                self._formatar(raciocinio),
+                self._formatar(total),
+            )
+        )
+        return "Tokens Codex", corpo
+
     def _ler_estado_tokens(self):
         """Le o estado de tokens conforme a fonte (claude ou arquivo)."""
         fonte = self.config.get("fonte", "limites")
 
         if fonte == "claude":
-            estado = claude_session.ler_sessao_ativa()
+            provedor = self.config.get("provedor", "claude")
+            estado = (
+                codex_session.ler_tokens()
+                if provedor == "codex"
+                else claude_session.ler_sessao_ativa()
+            )
             if estado is None:
                 return dict(token_logger.ESTADO_PADRAO)
-            baseline = self.config.get("baseline")
+            baseline = self.config.get(
+                "baseline_codex" if provedor == "codex" else "baseline"
+            )
             if (
                 isinstance(baseline, dict)
                 and baseline.get("session_id")
                 and baseline.get("session_id") == estado.get("session_id")
             ):
-                for chave in (
-                    "input_tokens", "output_tokens",
-                    "cache_creation_tokens", "cache_read_tokens",
-                ):
+                chaves = (
+                    ("input_tokens", "cached_input_tokens", "output_tokens",
+                     "reasoning_output_tokens", "total_tokens")
+                    if provedor == "codex"
+                    else ("input_tokens", "output_tokens",
+                          "cache_creation_tokens", "cache_read_tokens")
+                )
+                for chave in chaves:
                     estado[chave] = max(
                         0,
                         int(estado.get(chave, 0)) - int(baseline.get(chave, 0)),
@@ -510,6 +658,7 @@ class TokenWidget(QWidget):
                 not estado.get("session_started")
                 and int(estado.get("input_tokens", 0)) == 0
                 and int(estado.get("output_tokens", 0)) == 0
+                and int(estado.get("reasoning_output_tokens", 0)) == 0
                 and int(estado.get("cache_creation_tokens", 0)) == 0
                 and int(estado.get("cache_read_tokens", 0)) == 0
             )
@@ -599,6 +748,11 @@ class Aplicacao:
         acao_atualizar.triggered.connect(self.atualizar_agora)
         menu.addAction(acao_atualizar)
 
+        self.acao_provedor = QAction("Provedor: ...", menu)
+        self.acao_provedor.triggered.connect(self.alternar_provedor)
+        menu.addAction(self.acao_provedor)
+        self._atualizar_rotulo_provedor()
+
         self.acao_fonte = QAction("Fonte: ...", menu)
         self.acao_fonte.triggered.connect(self.alternar_fonte)
         menu.addAction(self.acao_fonte)
@@ -645,6 +799,25 @@ class Aplicacao:
             % (ROTULO_FONTE[fonte], ROTULO_FONTE[proxima])
         )
 
+    def _atualizar_rotulo_provedor(self):
+        """Atualiza o seletor simples Claude/Codex no tray."""
+        provedor = self.widget.config.get("provedor", "claude")
+        idx = PROVEDORES.index(provedor) if provedor in PROVEDORES else 0
+        proximo = PROVEDORES[(idx + 1) % len(PROVEDORES)]
+        self.acao_provedor.setText(
+            "Provedor: %s (trocar p/ %s)"
+            % (ROTULO_PROVEDOR[provedor], ROTULO_PROVEDOR[proximo])
+        )
+
+    def alternar_provedor(self):
+        """Alterna entre os backends Claude e Codex."""
+        provedor = self.widget.config.get("provedor", "claude")
+        idx = PROVEDORES.index(provedor) if provedor in PROVEDORES else 0
+        self.widget.config["provedor"] = PROVEDORES[(idx + 1) % len(PROVEDORES)]
+        config.salvar_config(self.widget.config)
+        self._atualizar_rotulo_provedor()
+        self.widget.atualizar_dados()
+
     def alternar_fonte(self):
         """Cicla entre as fontes: limites, claude, arquivo."""
         fonte = self.widget.config.get("fonte", "limites")
@@ -659,9 +832,12 @@ class Aplicacao:
         """Forca uma releitura imediata (inclui rede no modo limites)."""
         fonte = self.widget.config.get("fonte", "limites")
         if fonte == "limites":
-            resultado = usage_api.ler_limites(forcar=True)
-            with self.widget._lock:
-                self.widget._ultimo_limites = resultado
+            if self.widget.config.get("provedor") == "codex":
+                self.widget._buscar_limites_codex(forcar=True)
+            else:
+                resultado = usage_api.ler_limites(forcar=True)
+                with self.widget._lock:
+                    self.widget._ultimo_limites = resultado
         self.widget.atualizar_dados()
 
     def resetar(self):
@@ -676,17 +852,39 @@ class Aplicacao:
         fonte = self.widget.config.get("fonte", "limites")
 
         if fonte == "claude":
-            atual = claude_session.ler_sessao_ativa()
+            provedor = self.widget.config.get("provedor", "claude")
+            atual = (
+                codex_session.ler_tokens()
+                if provedor == "codex"
+                else claude_session.ler_sessao_ativa()
+            )
             if atual:
-                self.widget.config["baseline"] = {
+                baseline = {
                     "session_id": atual.get("session_id"),
                     "input_tokens": int(atual.get("input_tokens", 0)),
                     "output_tokens": int(atual.get("output_tokens", 0)),
-                    "cache_creation_tokens": int(
-                        atual.get("cache_creation_tokens", 0)
-                    ),
-                    "cache_read_tokens": int(atual.get("cache_read_tokens", 0)),
                 }
+                if provedor == "codex":
+                    baseline.update({
+                        "cached_input_tokens": int(
+                            atual.get("cached_input_tokens", 0)
+                        ),
+                        "reasoning_output_tokens": int(
+                            atual.get("reasoning_output_tokens", 0)
+                        ),
+                        "total_tokens": int(atual.get("total_tokens", 0)),
+                    })
+                else:
+                    baseline.update({
+                        "cache_creation_tokens": int(
+                            atual.get("cache_creation_tokens", 0)
+                        ),
+                        "cache_read_tokens": int(
+                            atual.get("cache_read_tokens", 0)
+                        ),
+                    })
+                chave = "baseline_codex" if provedor == "codex" else "baseline"
+                self.widget.config[chave] = baseline
                 config.salvar_config(self.widget.config)
         elif fonte == "arquivo":
             token_logger.resetar_sessao()
