@@ -34,6 +34,7 @@ from PySide6.QtCore import Qt, QTimer, QPoint, QSharedMemory
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QGuiApplication,
     QIcon,
     QPainter,
     QPainterPath,
@@ -136,11 +137,45 @@ class TokenWidget(QWidget):
         # Fundo translucido para desenharmos os cantos arredondados.
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-        # Posicao persistida.
-        self.move(int(self.config.get("pos_x", 80)),
-                  int(self.config.get("pos_y", 80)))
-
         self.setFixedWidth(250)
+
+        # Posicao persistida, mas garantindo que caia em uma tela visivel
+        # (a posicao salva pode ter ficado fora da area apos trocar de
+        # monitor ou resolucao).
+        x, y = self._posicao_visivel(
+            int(self.config.get("pos_x", 80)),
+            int(self.config.get("pos_y", 80)),
+        )
+        self.move(x, y)
+
+    def _posicao_visivel(self, x, y):
+        """
+        Ajusta (x, y) para que a janela fique dentro da area visivel de
+        algum monitor. Se a posicao salva estiver fora de qualquer tela
+        (ex.: monitor removido), reposiciona na tela primaria.
+
+        Retorna a tupla (x, y) ja corrigida.
+        """
+        # Tamanho estimado da janela. Antes de mostrar, sizeHint() ja da
+        # uma boa referencia; usamos a largura fixa de 250 como minimo.
+        larg = max(self.width(), self.sizeHint().width(), 250)
+        alt = max(self.height(), self.sizeHint().height(), 80)
+
+        # Procura uma tela que contenha o canto superior esquerdo.
+        tela = QGuiApplication.screenAt(QPoint(x, y))
+        if tela is None:
+            tela = QGuiApplication.primaryScreen()
+        if tela is None:
+            return x, y
+
+        area = tela.availableGeometry()
+
+        # Garante que a janela inteira caiba dentro da area disponivel.
+        max_x = area.right() - larg + 1
+        max_y = area.bottom() - alt + 1
+        x = min(max(x, area.left()), max(area.left(), max_x))
+        y = min(max(y, area.top()), max(area.top(), max_y))
+        return x, y
 
     def _montar_layout(self):
         """Cria o titulo e o corpo (texto rico) do widget."""
@@ -594,8 +629,13 @@ class Aplicacao:
         if self.widget.isVisible():
             self.widget.hide()
         else:
+            # Reposiciona em tela visivel antes de mostrar, para o caso de
+            # a janela ter ficado fora da area (monitor removido etc.).
+            x, y = self.widget._posicao_visivel(self.widget.x(), self.widget.y())
+            self.widget.move(x, y)
             self.widget.show()
             self.widget.raise_()
+            self.widget.activateWindow()
 
     def sair(self):
         """Encerra a aplicacao."""
