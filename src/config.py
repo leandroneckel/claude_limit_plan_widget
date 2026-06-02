@@ -6,6 +6,7 @@ Leitura e escrita da configuracao do widget.
 A config guarda:
   - pos_x, pos_y : posicao da janela na tela (persistida entre execucoes)
   - usd_brl      : cotacao fixa USD para BRL (default 5.40)
+  - provedor     : "claude" ou "codex"
 
 O arquivo de config fica em:
   %USERPROFILE%\\.claude_token_widget.json
@@ -28,6 +29,9 @@ CONFIG_PADRAO = {
     "pos_x": 80,
     "pos_y": 80,
     "usd_brl": 5.40,  # cotacao fixa, ajuste manualmente quando precisar
+    # Provedor dos limites e dos tokens da sessao. Claude continua sendo
+    # o padrao para preservar o comportamento das versoes anteriores.
+    "provedor": "claude",
     # Fonte dos dados:
     #   "limites" : limites de uso do plano (sessao 5h, semanal, creditos),
     #               igual a Configuracoes > Uso e ao /usage. E o padrao.
@@ -41,6 +45,8 @@ CONFIG_PADRAO = {
     # no momento do reset e o widget passa a mostrar o delta a partir dai.
     # Estrutura: {"session_id": ..., "input_tokens": ..., ...}
     "baseline": None,
+    # Baseline separado para os tokens da thread Codex.
+    "baseline_codex": None,
 }
 
 
