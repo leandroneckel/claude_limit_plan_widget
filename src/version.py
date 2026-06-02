@@ -17,4 +17,4 @@ Quem estiver com um .exe antigo vera "atualizacao disponivel" assim que
 este numero no GitHub ficar maior que o embutido no exe dele.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
