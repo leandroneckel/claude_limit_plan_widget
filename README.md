@@ -33,7 +33,11 @@ créditos de uso, com barras de progresso e o tempo para reiniciar.
   widget (evita consultas duplicadas e 429).
 - Arrastável com o mouse. A posição persiste entre execuções.
 - Ícone no system tray com menu: Mostrar/Ocultar, Atualizar agora,
-  alternar Fonte, Resetar (modo tokens), Sair.
+  alternar Fonte, Resetar (modo tokens), Verificar atualização, Abrir
+  página do projeto, Sair.
+- Mostra a **versão** no rodapé do card e verifica no GitHub se há uma
+  versão mais nova, avisando com destaque e um balão no tray (ver
+  "Versão e verificação de atualização").
 - Tratamento de erro: se não houver login ou conexão, mostra "sem dados"
   com o motivo, em vez de quebrar.
 
@@ -130,6 +134,8 @@ claude_token_win_tray/
     token_logger.py      função registrar() para uso externo (fonte manual)
     pricing.py           tabela de preços por modelo + cálculo
     config.py            leitura/escrita de config (posição, usd_brl, fonte)
+    version.py           versão do app (fonte única, embutida no .exe)
+    updater.py           verifica no GitHub se há versão mais nova
   requirements.txt
   build.bat              compila com PyInstaller
   README.md
@@ -197,6 +203,43 @@ O `build.bat` usa o PyInstaller com as flags:
 O ícone é gerado por código (um medidor com três barras), não precisa de
 arquivo .ico.
 
+## Versão e verificação de atualização
+
+A versão fica em um único lugar: a constante `__version__` em
+`src\version.py`. Ela é embutida no `.exe` no momento do build (o
+PyInstaller inclui o módulo automaticamente, sem precisar de `--add-data`)
+e aparece no rodapé do card (ex.: `v1.1.0`).
+
+O widget verifica sozinho se há uma versão mais nova publicada no GitHub:
+
+- Ao abrir (e quando você clica em **Verificar atualização** no tray), uma
+  thread lê o arquivo `src/version.py` do branch `main` via
+  `raw.githubusercontent.com` e compara com a versão embutida no `.exe`.
+- A comparação é numérica por partes (`1.2.0` > `1.1.9`). A consulta tem
+  cache de 6 horas e nunca trava a interface.
+- Se houver versão mais nova, o rodapé fica laranja
+  (`v1.1.0 • atualizacao 1.2.0 disponivel`) e um balão aparece no tray. O
+  item **Abrir página do projeto** leva à página do GitHub para baixar.
+- A URL do repositório consultado está em `URL_VERSAO_REMOTA` (e
+  `URL_PROJETO`) no `src\updater.py`. Se você fizer um fork, ajuste lá.
+
+Nada é enviado nessa verificação: é apenas um `GET` público do arquivo de
+versão. Se não houver internet, o widget continua funcionando normalmente e
+só não mostra o aviso.
+
+### Como lançar uma nova versão
+
+1. Incremente `__version__` em `src\version.py` (formato `X.Y.Z`).
+2. Faça commit e push para o branch `main`.
+3. Reconstrua o `.exe` com `build.bat` e distribua (ver seção abaixo).
+
+Quem estiver com um `.exe` antigo verá o aviso de atualização assim que o
+número no GitHub ficar maior que o embutido no executável dele.
+
+> Importante: o `.exe` é um snapshot do código. Qualquer mudança no
+> `src` (inclusive a versão) só aparece para os usuários depois de rodar
+> `build.bat` de novo e distribuir o novo executável.
+
 ## Como publicar no GitHub (para quem mantém o projeto)
 
 O `.gitignore` já exclui `dist/`, `build/`, `.venv/` e os arquivos locais de
@@ -205,10 +248,12 @@ não devem ir para o repositório.
 
 Para distribuir o executável para outras pessoas:
 
-1. Compile com `build.bat` (gera `dist\TokenWidget.exe`).
-2. No GitHub, crie um **Release** e anexe o `TokenWidget.exe` como binário do
+1. Incremente `__version__` em `src\version.py` e faça push (assim os
+   usuários com versão antiga recebem o aviso de atualização).
+2. Compile com `build.bat` (gera `dist\TokenWidget.exe`).
+3. No GitHub, crie um **Release** e anexe o `TokenWidget.exe` como binário do
    release (em vez de commitar dentro do repositório).
-3. No README, aponte os usuários para a página de Releases para baixar o
+4. No README, aponte os usuários para a página de Releases para baixar o
    `.exe` pronto.
 
 Assim o código-fonte fica versionado e o binário fica disponível para
@@ -287,6 +332,10 @@ A cotação USD para BRL é fixa, lida do campo `usd_brl` da config
   Claude, arquivo manual).
 - **Resetar (modo tokens)** : reseta as fontes em tokens (baseline no modo
   `claude`, zera o arquivo no modo `arquivo`). Não se aplica ao modo limites.
+- **Verificar atualização** : consulta o GitHub na hora e avisa se há uma
+  versão mais nova (ver "Versão e verificação de atualização").
+- **Abrir página do projeto** : abre o repositório no navegador para baixar
+  a versão mais recente.
 - **Sair** : encerra o app.
 
 ## Aviso e privacidade
