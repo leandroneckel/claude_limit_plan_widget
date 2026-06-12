@@ -40,6 +40,11 @@ CONFIG_PADRAO = {
     #   "arquivo" : le do arquivo manual %USERPROFILE%\.claude_tokens.json
     #               (alimentado por token_logger.registrar())
     "fonte": "limites",
+    # Modo de exibicao:
+    #   "widget"  : janela flutuante sempre no topo (padrao).
+    #   "bandeja" : sem janela; o proprio icone do system tray mostra a
+    #               % da sessao atual desenhada nele. Mais discreto.
+    "exibicao": "widget",
     # Ponto de partida (baseline) para o botao Resetar no modo "claude".
     # Como nao da para apagar o transcript, guardamos aqui o consumo
     # no momento do reset e o widget passa a mostrar o delta a partir dai.

@@ -65,6 +65,12 @@ import version
 # Ordem de alternancia das fontes no menu do tray.
 FONTES = ["limites", "claude", "arquivo"]
 PROVEDORES = ["claude", "codex"]
+EXIBICOES = ["widget", "bandeja"]
+
+ROTULO_EXIBICAO = {
+    "widget": "Widget flutuante",
+    "bandeja": "So numeros na bandeja",
+}
 
 ROTULO_PROVEDOR = {
     "claude": "Claude",
@@ -110,6 +116,48 @@ def gerar_icone():
     return QIcon(pixmap)
 
 
+def _cor_por_pct(pct):
+    """Cor do numero conforme o nivel de uso (verde/amarelo/vermelho)."""
+    if pct < 50:
+        return QColor(76, 175, 80)    # verde
+    if pct < 80:
+        return QColor(255, 193, 7)    # amarelo
+    return QColor(255, 82, 82)        # vermelho
+
+
+def gerar_icone_numero(texto, cor_texto):
+    """
+    Gera um icone de bandeja com um numero desenhado dentro.
+
+    Usado no modo de exibicao "bandeja": em vez do icone generico, o tray
+    mostra a % da sessao (ex.: "47") em cor que reflete o nivel de uso,
+    sobre um fundo escuro arredondado. Retorna um QIcon.
+    """
+    tamanho = 64
+    pixmap = QPixmap(tamanho, tamanho)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.TextAntialiasing)
+
+    # Fundo escuro arredondado para contraste com a barra de tarefas.
+    painter.setBrush(QColor(28, 31, 38))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(2, 2, tamanho - 4, tamanho - 4, 14, 14)
+
+    # Numero centralizado; fonte menor quando tem mais digitos (ex.: 100).
+    fonte = painter.font()
+    fonte.setBold(True)
+    fonte.setPixelSize(44 if len(texto) <= 2 else 30)
+    painter.setFont(fonte)
+    painter.setPen(cor_texto)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, texto)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 class TokenWidget(QWidget):
     """Janela flutuante que exibe o uso conforme a fonte configurada."""
 
@@ -117,6 +165,9 @@ class TokenWidget(QWidget):
     # Carrega o dict de updater.verificar_atualizacao() acrescido de "_manual".
     versao_verificada = Signal(dict)
     limites_codex_atualizados = Signal(dict)
+    # Emitido ao fim de cada atualizar_dados(); o tray usa para redesenhar
+    # o icone com numero no modo "bandeja".
+    dados_atualizados = Signal()
 
     def __init__(self):
         super().__init__()
@@ -677,6 +728,30 @@ class TokenWidget(QWidget):
         self.adjustSize()
         self.setFixedWidth(250)
 
+        # Avisa o tray para redesenhar o icone (modo bandeja).
+        self.dados_atualizados.emit()
+
+    def pct_sessao_atual(self):
+        """
+        Retorna a % de uso da sessao atual do provedor ativo, ou None se
+        ainda nao houver dados. Usado pelo icone numerico da bandeja.
+        """
+        provedor = self.config.get("provedor", "claude")
+        if provedor == "codex":
+            dados = self._ultimo_limites_codex or codex_session.ler_limites()
+        else:
+            with self._lock:
+                dados = self._ultimo_limites
+        if not dados or not dados.get("ok"):
+            return None
+        sessao = dados.get("sessao")
+        if not sessao:
+            return None
+        try:
+            return float(sessao.get("utilization", 0))
+        except (TypeError, ValueError):
+            return None
+
     # ----- Arrasto da janela com o mouse -----
 
     def mousePressEvent(self, event):
@@ -730,6 +805,11 @@ class Aplicacao:
 
         self._montar_tray()
 
+        # O tray redesenha o icone numerico sempre que os dados mudam.
+        self.widget.dados_atualizados.connect(self._refrescar_tray)
+        # Aplica o modo de exibicao salvo (widget ou so bandeja).
+        self._aplicar_exibicao()
+
         # Checagem de versao no startup (roda em background).
         self.widget.verificar_versao()
 
@@ -757,6 +837,11 @@ class Aplicacao:
         self.acao_fonte.triggered.connect(self.alternar_fonte)
         menu.addAction(self.acao_fonte)
         self._atualizar_rotulo_fonte()
+
+        self.acao_exibicao = QAction("Exibicao: ...", menu)
+        self.acao_exibicao.triggered.connect(self.alternar_exibicao)
+        menu.addAction(self.acao_exibicao)
+        self._atualizar_rotulo_exibicao()
 
         acao_resetar = QAction("Resetar (modo tokens)", menu)
         acao_resetar.triggered.connect(self.resetar)
@@ -807,6 +892,54 @@ class Aplicacao:
         self.acao_provedor.setText(
             "Provedor: %s (trocar p/ %s)"
             % (ROTULO_PROVEDOR[provedor], ROTULO_PROVEDOR[proximo])
+        )
+
+    def _atualizar_rotulo_exibicao(self):
+        """Atualiza o item de menu do modo de exibicao (widget/bandeja)."""
+        atual = self.widget.config.get("exibicao", "widget")
+        idx = EXIBICOES.index(atual) if atual in EXIBICOES else 0
+        proxima = EXIBICOES[(idx + 1) % len(EXIBICOES)]
+        self.acao_exibicao.setText(
+            "Exibicao: %s (trocar p/ %s)"
+            % (ROTULO_EXIBICAO[atual], ROTULO_EXIBICAO[proxima])
+        )
+
+    def alternar_exibicao(self):
+        """Alterna entre widget flutuante e somente numeros na bandeja."""
+        atual = self.widget.config.get("exibicao", "widget")
+        idx = EXIBICOES.index(atual) if atual in EXIBICOES else 0
+        self.widget.config["exibicao"] = EXIBICOES[(idx + 1) % len(EXIBICOES)]
+        config.salvar_config(self.widget.config)
+        self._atualizar_rotulo_exibicao()
+        self._aplicar_exibicao()
+
+    def _aplicar_exibicao(self):
+        """Mostra/oculta o widget conforme o modo e redesenha o tray."""
+        if self.widget.config.get("exibicao", "widget") == "bandeja":
+            self.widget.hide()
+        else:
+            x, y = self.widget._posicao_visivel(
+                self.widget.x(), self.widget.y()
+            )
+            self.widget.move(x, y)
+            self.widget.show()
+            self.widget.raise_()
+        self._refrescar_tray()
+
+    def _refrescar_tray(self):
+        """
+        Atualiza o icone do tray. No modo bandeja desenha a % da sessao
+        atual dentro do icone; nos demais casos usa o icone padrao.
+        """
+        if self.widget.config.get("exibicao", "widget") != "bandeja":
+            self.tray.setIcon(self.icone)
+            return
+        pct = self.widget.pct_sessao_atual()
+        if pct is None:
+            self.tray.setIcon(self.icone)
+            return
+        self.tray.setIcon(
+            gerar_icone_numero("%d" % round(pct), _cor_por_pct(pct))
         )
 
     def alternar_provedor(self):
